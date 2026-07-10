@@ -67,7 +67,3 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "{powershell_scrip
     )
 
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
