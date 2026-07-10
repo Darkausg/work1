@@ -2,7 +2,7 @@ from pathlib import Path
 import subprocess
 
 
-def main():
+def install():
     """
     Installer for the shortcut-transfer PowerShell script.
 
