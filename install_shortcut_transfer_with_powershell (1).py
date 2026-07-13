@@ -1,227 +1,196 @@
-from pathlib import Path
-import subprocess
-
-
-def install():
+def transfer_shortcuts() -> int:
     """
-    Installer for the shortcut-transfer PowerShell script.
+    Move public desktop shortcuts into a shared folder, then copy them once
+    to the current user's Desktop.
 
-    What this program does:
-    1. Creates the public ShortcutHolder folder if needed.
-    2. Writes the PowerShell shortcut-transfer script.
-    3. Creates a .bat launcher in the all-users Startup folder.
-    4. Executes the PowerShell script once immediately.
+    Returns:
+        0 if execution finishes successfully.
+        1 if a critical error occurs.
 
     Important:
-    - Run this Python script once as administrator.
-    - The Startup folder used here applies to all users.
-    - The PowerShell script creates a hidden per-user README marker in AppData.
-      If that marker exists, shortcuts are not copied again for that user.
+        Administrator rights may be required to move shortcuts from:
+        C:\\Users\\Public\\Desktop
     """
+    import ctypes
+    import os
+    import shutil
+    from pathlib import Path
 
-    startup_folder = Path(
-        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
+    public_desktop = Path(r"C:\Users\Public\Desktop")
+    shortcut_holder = Path(r"C:\Users\Public\ShortcutHolder")
+
+    # Retrieve the actual Desktop folder of the current user.
+    desktop_buffer = ctypes.create_unicode_buffer(260)
+
+    result = ctypes.windll.shell32.SHGetFolderPathW(
+        None,
+        0x0010,  # CSIDL_DESKTOPDIRECTORY
+        None,
+        0,
+        desktop_buffer,
     )
 
-    script_folder = Path(r"C:\Users\Public\ShortcutHolder")
-    script_folder.mkdir(parents=True, exist_ok=True)
+    if result == 0 and desktop_buffer.value.strip():
+        destination_desktop = Path(desktop_buffer.value)
+    else:
+        user_profile = os.environ.get("USERPROFILE")
 
-    powershell_script_path = script_folder / "shortcut_transfer.ps1"
-    launcher_path = startup_folder / "shortcut_transfer_launcher.bat"
+        if user_profile:
+            destination_desktop = Path(user_profile) / "Desktop"
+        else:
+            destination_desktop = Path.home() / "Desktop"
 
-    powershell_script_content = r'''$ErrorActionPreference = "Stop"
+    # Determine the per-user marker location.
+    local_app_data = os.environ.get("LOCALAPPDATA")
 
-try {
-    $DesktopPublic = "C:\Users\Public\Desktop"
-    $TempHolder = "C:\Users\Public\ShortcutHolder"
+    if local_app_data:
+        marker_folder = Path(local_app_data) / "ShortcutTransfer"
+    else:
+        marker_folder = (
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "ShortcutTransfer"
+        )
 
-    # Get the Desktop folder of the currently logged-in user
-    $Dest = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+    readme_path = marker_folder / "README_ShortcutTransfer.txt"
 
-    # Fallback in case Windows returns an empty path
-    if ([string]::IsNullOrWhiteSpace($Dest)) {
-        $Dest = Join-Path $env:USERPROFILE "Desktop"
-    }
+    try:
+        shortcut_holder.mkdir(parents=True, exist_ok=True)
+        marker_folder.mkdir(parents=True, exist_ok=True)
+        destination_desktop.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as error:
+        print(f"Erreur pendant la création des dossiers : {error}")
+        input("Appuyez sur Entrée pour fermer.")
+        return 1
 
-    # Hidden per-user marker folder
-    $MarkerFolder = Join-Path $env:LOCALAPPDATA "ShortcutTransfer"
-    $ReadmePath = Join-Path $MarkerFolder "README_ShortcutTransfer.txt"
+    # Windows file attributes.
+    FILE_ATTRIBUTE_HIDDEN = 0x02
+    INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 
-    Write-Host "Bureau public : $DesktopPublic"
-    Write-Host "Dossier temporaire : $TempHolder"
-    Write-Host "Bureau utilisateur : $Dest"
-    Write-Host "Fichier README marqueur : $ReadmePath"
-    Write-Host ""
+    # Hide the marker folder without removing its existing attributes.
+    try:
+        attributes = ctypes.windll.kernel32.GetFileAttributesW(
+            str(marker_folder)
+        )
 
-    # Create ShortcutHolder if needed
-    if (-not (Test-Path $TempHolder)) {
-        Write-Host "Creation du dossier ShortcutHolder..."
-        New-Item -ItemType Directory -Path $TempHolder -Force | Out-Null
-    }
+        if attributes != INVALID_FILE_ATTRIBUTES:
+            ctypes.windll.kernel32.SetFileAttributesW(
+                str(marker_folder),
+                attributes | FILE_ATTRIBUTE_HIDDEN,
+            )
+    except (OSError, AttributeError):
+        pass
 
-    # Create the marker folder if needed
-    if (-not (Test-Path $MarkerFolder)) {
-        Write-Host "Creation du dossier marqueur..."
-        New-Item -ItemType Directory -Path $MarkerFolder -Force | Out-Null
-    }
+    # Move .lnk files from the Public Desktop to ShortcutHolder.
+    #
+    # This operation is attempted on every execution, including when the
+    # current user already has their README marker. This matches the original
+    # PowerShell script.
+    if public_desktop.exists():
+        try:
+            public_shortcuts = list(public_desktop.glob("*.lnk"))
+        except OSError:
+            public_shortcuts = []
 
-    # Make the marker folder hidden
-    attrib +h "$MarkerFolder"
+        for shortcut in public_shortcuts:
+            if not shortcut.is_file():
+                continue
 
-    # Create the current user's Desktop folder if needed
-    if (-not (Test-Path $Dest)) {
-        Write-Host "Creation du bureau utilisateur..."
-        New-Item -ItemType Directory -Path $Dest -Force | Out-Null
-    }
+            target = shortcut_holder / shortcut.name
 
-    # Move .lnk shortcuts from Public Desktop to ShortcutHolder.
-    # This can require administrator rights depending on Windows permissions.
-    if (Test-Path $DesktopPublic) {
-        Write-Host "Recherche des raccourcis dans le bureau public..."
+            # Do not overwrite a shortcut already stored in ShortcutHolder.
+            if target.exists():
+                continue
 
-        Get-ChildItem -Path $DesktopPublic -File -Filter "*.lnk" | ForEach-Object {
-            $SourcePath = $_.FullName
-            $Target = Join-Path $TempHolder $_.Name
+            try:
+                shutil.move(str(shortcut), str(target))
+            except (OSError, PermissionError, shutil.Error):
+                # Moving files from Public Desktop may require administrator
+                # privileges. Ignore the failure and continue.
+                continue
 
-            if (-not (Test-Path $Target)) {
-                try {
-                    Write-Host "Deplacement : $SourcePath -> $Target"
-                    Move-Item -Path $SourcePath -Destination $Target -ErrorAction Stop
-                }
-                catch {
-                    Write-Host "Erreur lors du deplacement de : $SourcePath"
-                    Write-Host $_.Exception.Message
-                    Write-Host ""
-                }
-            }
-            else {
-                Write-Host "Ignore, deja present dans ShortcutHolder : $($_.Name)"
-            }
-        }
-    }
-    else {
-        Write-Host "Le dossier Public Desktop n'existe pas : $DesktopPublic"
-    }
+    # If the marker already exists, shortcuts must not be copied again.
+    if readme_path.exists():
+        return 0
 
-    Write-Host ""
+    # Copy the stored shortcuts to the current user's Desktop.
+    if shortcut_holder.exists():
+        try:
+            stored_shortcuts = list(shortcut_holder.glob("*.lnk"))
+        except OSError:
+            stored_shortcuts = []
 
-    # If the README marker already exists, do not transfer shortcuts again
-    if (Test-Path $ReadmePath) {
-        Write-Host "README deja present."
-        Write-Host "Les raccourcis ne seront pas recopies sur le bureau utilisateur."
-    }
-    else {
-        # Copy .lnk shortcuts from ShortcutHolder to the current user's Desktop
-        if (Test-Path $TempHolder) {
-            Write-Host "Copie des raccourcis vers le bureau utilisateur..."
+        for shortcut in stored_shortcuts:
+            if not shortcut.is_file():
+                continue
 
-            Get-ChildItem -Path $TempHolder -File -Filter "*.lnk" | ForEach-Object {
-                $SourcePath = $_.FullName
-                $Target = Join-Path $Dest $_.Name
+            target = destination_desktop / shortcut.name
 
-                if (-not (Test-Path $Target)) {
-                    try {
-                        Write-Host "Copie : $SourcePath -> $Target"
-                        Copy-Item -Path $SourcePath -Destination $Target -ErrorAction Stop
-                    }
-                    catch {
-                        Write-Host "Erreur lors de la copie de : $SourcePath"
-                        Write-Host $_.Exception.Message
-                        Write-Host ""
-                    }
-                }
-                else {
-                    Write-Host "Ignore, deja present sur le bureau utilisateur : $($_.Name)"
-                }
-            }
-        }
+            # Do not overwrite an existing desktop shortcut.
+            if target.exists():
+                continue
 
-        # Create README marker at the end of script execution
-        $ReadmeContent = @"
-README - Shortcut Transfer
+            try:
+                shutil.copy2(shortcut, target)
+            except (OSError, PermissionError, shutil.Error):
+                # Ignore individual copying errors and continue.
+                continue
 
-Ce fichier a ete cree automatiquement par le script de transfert des raccourcis.
+    readme_content = f"""README - Shortcut Transfer
+
+Ce fichier a été créé automatiquement par le script de transfert des raccourcis.
 
 Fonctionnement :
-- Au premier lancement pour cet utilisateur, le script copie les raccourcis stockes dans :
-  C:\Users\Public\ShortcutHolder
+- Au premier lancement pour cet utilisateur, le script copie les raccourcis stockés dans :
+  {shortcut_holder}
 
   vers le bureau de l'utilisateur courant :
-  $Dest
+  {destination_desktop}
 
-- Une fois le transfert termine, ce fichier README est cree dans :
-  $MarkerFolder
+- Une fois le transfert terminé, ce fichier README est créé dans :
+  {marker_folder}
 
-- Lors des prochains demarrages ou connexions utilisateur, le script verifie si ce fichier README existe.
+- Lors des prochains démarrages ou connexions utilisateur, le script vérifie si ce fichier README existe.
 
-- Si ce fichier README est present, le script ne recopie pas les icones sur le bureau utilisateur.
+- Si ce fichier README est présent, le script ne recopie pas les icônes sur le bureau utilisateur.
 
 Pourquoi ce fichier existe :
-Ce fichier evite qu'une icone supprimee manuellement par l'utilisateur soit automatiquement remise sur le bureau au prochain redemarrage.
+Ce fichier évite qu'une icône supprimée manuellement par l'utilisateur soit automatiquement remise sur le bureau au prochain redémarrage.
 
-Pour reactiver le transfert pour cet utilisateur :
-Supprimez ce fichier README, puis redemarrez la session utilisateur ou relancez le script.
+Pour réactiver le transfert pour cet utilisateur :
+Supprimez ce fichier README, puis redémarrez la session utilisateur ou relancez le script.
 
-Fichier utilise comme marqueur :
-$ReadmePath
-"@
-
-        Write-Host ""
-        Write-Host "Creation du README marqueur..."
-        Set-Content -Path $ReadmePath -Value $ReadmeContent -Encoding UTF8
-
-        # Make the README marker hidden too
-        attrib +h "$ReadmePath"
-
-        Write-Host "README cree : $ReadmePath"
-    }
-
-    Write-Host ""
-    Write-Host "Script termine correctement."
-}
-catch {
-    Write-Host ""
-    Write-Host "ERREUR GENERALE DU SCRIPT"
-    Write-Host $_.Exception.Message
-}
-finally {
-    Write-Host ""
-    Read-Host "Appuyez sur Entree pour fermer cette fenetre"
-}
-    '''
-    # Write or update the PowerShell script
-    powershell_script_path.write_text(
-        powershell_script_content,
-        encoding="utf-8"
-    )
-
-    # Do not put the .ps1 directly in the Startup folder.
-    # A .ps1 placed directly there may open in Notepad instead of executing.
-    accidental_ps1_in_startup = startup_folder / "shortcut_transfer.ps1"
-    if accidental_ps1_in_startup.exists():
-        accidental_ps1_in_startup.unlink()
-
-    launcher_content = f"""@echo off
-powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "{powershell_script_path}"
+Fichier utilisé comme marqueur :
+{readme_path}
 """
 
-    # Create or update the .bat launcher in the all-users Startup folder
-    launcher_path.write_text(
-        launcher_content,
-        encoding="utf-8"
-    )
+    try:
+        readme_path.write_text(
+            readme_content,
+            encoding="utf-8",
+        )
+    except (OSError, PermissionError) as error:
+        print(f"Impossible de créer le fichier marqueur : {error}")
+        input("Appuyez sur Entrée pour fermer.")
+        return 1
 
-    # Execute the PowerShell script once immediately
-    subprocess.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "RemoteSigned",
-            "-File",
-            str(powershell_script_path),
-        ],
-        check=False
-    )
+    # Hide the README marker without removing its existing attributes.
+    try:
+        attributes = ctypes.windll.kernel32.GetFileAttributesW(
+            str(readme_path)
+        )
+
+        if attributes != INVALID_FILE_ATTRIBUTES:
+            ctypes.windll.kernel32.SetFileAttributesW(
+                str(readme_path),
+                attributes | FILE_ATTRIBUTE_HIDDEN,
+            )
+    except (OSError, AttributeError):
+        pass
+
+    print()
+    print("Script terminé. Appuyez sur Entrée pour fermer.")
+    input()
 
     return 0
