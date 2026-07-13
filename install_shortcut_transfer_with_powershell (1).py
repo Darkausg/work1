@@ -29,7 +29,8 @@ def install():
     powershell_script_path = script_folder / "shortcut_transfer.ps1"
     launcher_path = startup_folder / "shortcut_transfer_launcher.bat"
 
-    powershell_script_content = r'''$DesktopPublic = "C:\Users\Public\Desktop"
+    powershell_script_content = r'''$ErrorActionPreference = "Stop"
+    $DesktopPublic = "C:\Users\Public\Desktop"
     $TempHolder = "C:\Users\Public\ShortcutHolder"
 
     # Get the Desktop folder of the currently logged-in user
@@ -136,6 +137,10 @@ def install():
 
     # Make the README marker hidden too
     attrib +h $ReadmePath
+
+    Write-Host ""
+    Write-Host "Script termine. Appuyez sur Entree pour fermer."
+    Read-Host
 
     exit 0
     '''
