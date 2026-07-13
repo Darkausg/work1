@@ -1,4 +1,7 @@
-def transfer_shortcuts() -> int:
+def install():
+    pass
+
+def session_setup() -> int:
     """
     Move public desktop shortcuts into a shared folder, then copy them once
     to the current user's Desktop.
