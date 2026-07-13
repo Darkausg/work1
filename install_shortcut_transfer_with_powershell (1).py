@@ -30,6 +30,8 @@ def install():
     launcher_path = startup_folder / "shortcut_transfer_launcher.bat"
 
     powershell_script_content = r'''$ErrorActionPreference = "Stop"
+
+try {
     $DesktopPublic = "C:\Users\Public\Desktop"
     $TempHolder = "C:\Users\Public\ShortcutHolder"
 
@@ -45,104 +47,147 @@ def install():
     $MarkerFolder = Join-Path $env:LOCALAPPDATA "ShortcutTransfer"
     $ReadmePath = Join-Path $MarkerFolder "README_ShortcutTransfer.txt"
 
+    Write-Host "Bureau public : $DesktopPublic"
+    Write-Host "Dossier temporaire : $TempHolder"
+    Write-Host "Bureau utilisateur : $Dest"
+    Write-Host "Fichier README marqueur : $ReadmePath"
+    Write-Host ""
+
     # Create ShortcutHolder if needed
     if (-not (Test-Path $TempHolder)) {
+        Write-Host "Creation du dossier ShortcutHolder..."
         New-Item -ItemType Directory -Path $TempHolder -Force | Out-Null
     }
 
     # Create the marker folder if needed
     if (-not (Test-Path $MarkerFolder)) {
+        Write-Host "Creation du dossier marqueur..."
         New-Item -ItemType Directory -Path $MarkerFolder -Force | Out-Null
     }
 
     # Make the marker folder hidden
-    attrib +h $MarkerFolder
+    attrib +h "$MarkerFolder"
 
     # Create the current user's Desktop folder if needed
     if (-not (Test-Path $Dest)) {
+        Write-Host "Creation du bureau utilisateur..."
         New-Item -ItemType Directory -Path $Dest -Force | Out-Null
     }
 
     # Move .lnk shortcuts from Public Desktop to ShortcutHolder.
     # This can require administrator rights depending on Windows permissions.
     if (Test-Path $DesktopPublic) {
+        Write-Host "Recherche des raccourcis dans le bureau public..."
+
         Get-ChildItem -Path $DesktopPublic -File -Filter "*.lnk" | ForEach-Object {
+            $SourcePath = $_.FullName
             $Target = Join-Path $TempHolder $_.Name
 
-            # If duplicate exists in ShortcutHolder, ignore the shortcut we are trying to move
             if (-not (Test-Path $Target)) {
                 try {
-                    Move-Item -Path $_.FullName -Destination $Target -ErrorAction Stop
+                    Write-Host "Deplacement : $SourcePath -> $Target"
+                    Move-Item -Path $SourcePath -Destination $Target -ErrorAction Stop
                 }
                 catch {
-                    # If moving fails because of permissions, ignore and continue
+                    Write-Host "Erreur lors du deplacement de : $SourcePath"
+                    Write-Host $_.Exception.Message
+                    Write-Host ""
                 }
+            }
+            else {
+                Write-Host "Ignore, deja present dans ShortcutHolder : $($_.Name)"
             }
         }
     }
+    else {
+        Write-Host "Le dossier Public Desktop n'existe pas : $DesktopPublic"
+    }
+
+    Write-Host ""
 
     # If the README marker already exists, do not transfer shortcuts again
     if (Test-Path $ReadmePath) {
-        exit 0
+        Write-Host "README deja present."
+        Write-Host "Les raccourcis ne seront pas recopies sur le bureau utilisateur."
     }
+    else {
+        # Copy .lnk shortcuts from ShortcutHolder to the current user's Desktop
+        if (Test-Path $TempHolder) {
+            Write-Host "Copie des raccourcis vers le bureau utilisateur..."
 
-    # Copy .lnk shortcuts from ShortcutHolder to the current user's Desktop
-    if (Test-Path $TempHolder) {
-        Get-ChildItem -Path $TempHolder -File -Filter "*.lnk" | ForEach-Object {
-            $Target = Join-Path $Dest $_.Name
+            Get-ChildItem -Path $TempHolder -File -Filter "*.lnk" | ForEach-Object {
+                $SourcePath = $_.FullName
+                $Target = Join-Path $Dest $_.Name
 
-            # If duplicate exists on user's Desktop, ignore the shortcut we are trying to copy
-            if (-not (Test-Path $Target)) {
-                try {
-                    Copy-Item -Path $_.FullName -Destination $Target -ErrorAction Stop
+                if (-not (Test-Path $Target)) {
+                    try {
+                        Write-Host "Copie : $SourcePath -> $Target"
+                        Copy-Item -Path $SourcePath -Destination $Target -ErrorAction Stop
+                    }
+                    catch {
+                        Write-Host "Erreur lors de la copie de : $SourcePath"
+                        Write-Host $_.Exception.Message
+                        Write-Host ""
+                    }
                 }
-                catch {
-                    # If copying fails, ignore and continue
+                else {
+                    Write-Host "Ignore, deja present sur le bureau utilisateur : $($_.Name)"
                 }
             }
         }
+
+        # Create README marker at the end of script execution
+        $ReadmeContent = @"
+README - Shortcut Transfer
+
+Ce fichier a ete cree automatiquement par le script de transfert des raccourcis.
+
+Fonctionnement :
+- Au premier lancement pour cet utilisateur, le script copie les raccourcis stockes dans :
+  C:\Users\Public\ShortcutHolder
+
+  vers le bureau de l'utilisateur courant :
+  $Dest
+
+- Une fois le transfert termine, ce fichier README est cree dans :
+  $MarkerFolder
+
+- Lors des prochains demarrages ou connexions utilisateur, le script verifie si ce fichier README existe.
+
+- Si ce fichier README est present, le script ne recopie pas les icones sur le bureau utilisateur.
+
+Pourquoi ce fichier existe :
+Ce fichier evite qu'une icone supprimee manuellement par l'utilisateur soit automatiquement remise sur le bureau au prochain redemarrage.
+
+Pour reactiver le transfert pour cet utilisateur :
+Supprimez ce fichier README, puis redemarrez la session utilisateur ou relancez le script.
+
+Fichier utilise comme marqueur :
+$ReadmePath
+"@
+
+        Write-Host ""
+        Write-Host "Creation du README marqueur..."
+        Set-Content -Path $ReadmePath -Value $ReadmeContent -Encoding UTF8
+
+        # Make the README marker hidden too
+        attrib +h "$ReadmePath"
+
+        Write-Host "README cree : $ReadmePath"
     }
 
-    # Create README marker at the end of script execution
-    $ReadmeContent = @"
-    README - Shortcut Transfer
-
-    Ce fichier a ete cree automatiquement par le script de transfert des raccourcis.
-
-    Fonctionnement :
-    - Au premier lancement pour cet utilisateur, le script copie les raccourcis stockes dans :
-      C:\Users\Public\ShortcutHolder
-
-      vers le bureau de l'utilisateur courant :
-      $Dest
-
-    - Une fois le transfert termine, ce fichier README est cree dans :
-      $MarkerFolder
-
-    - Lors des prochains demarrages ou connexions utilisateur, le script verifie si ce fichier README existe.
-
-    - Si ce fichier README est present, le script ne recopie pas les icones sur le bureau utilisateur.
-
-    Pourquoi ce fichier existe :
-    Ce fichier evite qu'une icone supprimee manuellement par l'utilisateur soit automatiquement remise sur le bureau au prochain redemarrage.
-
-    Pour reactiver le transfert pour cet utilisateur :
-    Supprimez ce fichier README, puis redemarrez la session utilisateur ou relancez le script.
-
-    Fichier utilise comme marqueur :
-    $ReadmePath
-    "@
-
-    Set-Content -Path $ReadmePath -Value $ReadmeContent -Encoding UTF8
-
-    # Make the README marker hidden too
-    attrib +h $ReadmePath
-
     Write-Host ""
-    Write-Host "Script termine. Appuyez sur Entree pour fermer."
-    Read-Host
-
-    exit 0
+    Write-Host "Script termine correctement."
+}
+catch {
+    Write-Host ""
+    Write-Host "ERREUR GENERALE DU SCRIPT"
+    Write-Host $_.Exception.Message
+}
+finally {
+    Write-Host ""
+    Read-Host "Appuyez sur Entree pour fermer cette fenetre"
+}
     '''
     # Write or update the PowerShell script
     powershell_script_path.write_text(
